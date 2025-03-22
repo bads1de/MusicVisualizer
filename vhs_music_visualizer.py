@@ -42,11 +42,11 @@ class VHSMusicVisualizer:
         self.audio_path = audio_path
         self.output_path = output_path
         self.fps = 24
-        self.vhs_noise_intensity = 0.3
-        self.tracking_error_chance = 0.05
-        self.color_bleeding_intensity = 0.4
-        self.scanline_intensity = 0.2
-        self.glitch_chance = 0.1
+        self.vhs_noise_intensity = 0.4
+        self.tracking_error_chance = 0.07
+        self.color_bleeding_intensity = 0.6
+        self.scanline_intensity = 0.3
+        self.glitch_chance = 0.15
         self.timecode_enabled = True
         self.start_time = time.time()
 
@@ -95,8 +95,8 @@ class VHSMusicVisualizer:
         self.img = cv2.cvtColor(self.img, cv2.COLOR_BGR2RGB)
 
         # 画像のアスペクト比を維持しながらリサイズ
-        target_height = 480  # VHSの標準的な解像度
-        target_width = 640
+        target_height = 960  # 9:16アスペクト比の縦長解像度
+        target_width = 540
 
         h, w = self.img.shape[:2]
         aspect = w / h
@@ -126,6 +126,7 @@ class VHSMusicVisualizer:
         ビデオファイルを初期化し、書き込み準備を行います。
         """
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        # 9:16アスペクト比の縦長動画を作成
         self.video = cv2.VideoWriter(
             "temp_output.mp4", fourcc, self.fps, (self.width, self.height)
         )
@@ -133,68 +134,96 @@ class VHSMusicVisualizer:
     def apply_vhs_noise(self, frame, intensity):
         """
         VHSノイズを適用します。
+        高速化版
 
         :param frame: np.ndarray 現在のフレーム
         :param intensity: float ノイズの強度
         :return: np.ndarray 更新されたフレーム
         """
-        noise = np.random.normal(0, 15, frame.shape).astype(np.int16)
+        # ノイズ生成を高速化（サイズを小さくしてからリサイズ）
+        height, width = frame.shape[:2]
+        scale_factor = 0.5  # ノイズの解像度を半分に
+        small_noise = np.random.normal(0, 15, (int(height * scale_factor), int(width * scale_factor), 3)).astype(np.int16)
+        noise = cv2.resize(small_noise, (width, height), interpolation=cv2.INTER_LINEAR)
+
+        # ノイズを適用
         frame_int16 = frame.astype(np.int16) + (noise * intensity).astype(np.int16)
-        frame = np.clip(frame_int16, 0, 255).astype(np.uint8)
-        return frame
+        return np.clip(frame_int16, 0, 255).astype(np.uint8)
 
     def apply_scanlines(self, frame, intensity):
         """
         スキャンラインエフェクトを適用します。
+        高速化版
 
         :param frame: np.ndarray 現在のフレーム
         :param intensity: float スキャンラインの強度
         :return: np.ndarray 更新されたフレーム
         """
-        scanlines = np.ones_like(frame)
-        scanlines[::2, :] = 1.0 - intensity
-        frame = frame * scanlines
-        return frame.astype(np.uint8)
+        height, width = frame.shape[:2]
+
+        # ベクトル化した高速処理
+        # 奇数行にのみスキャンラインを適用
+        frame_float = frame.astype(np.float32)
+        frame_float[::2, :] = frame_float[::2, :] * (1.0 - intensity)
+
+        # ムラを加えるのはランダムな一部の行のみにして高速化
+        if np.random.random() < 0.3:  # 30%の確率でムラを加える
+            random_rows = np.random.choice(range(0, height, 2), size=min(10, height//2), replace=False)
+            for y in random_rows:
+                noise = np.random.uniform(0.9, 1.0, width)
+                frame_float[y, :, 0] *= noise
+                frame_float[y, :, 1] *= noise
+                frame_float[y, :, 2] *= noise
+
+        return np.clip(frame_float, 0, 255).astype(np.uint8)
 
     def apply_color_bleeding(self, frame, intensity):
         """
         カラーブリーディングエフェクトを適用します。
+        高速化版
 
         :param frame: np.ndarray 現在のフレーム
         :param intensity: float カラーブリーディングの強度
         :return: np.ndarray 更新されたフレーム
         """
+        # チャンネルを分割
         b, g, r = cv2.split(frame)
 
-        # 赤チャンネルを右にシフト
-        r_shifted = np.zeros_like(r)
-        r_shift_amount = int(4 * intensity)  # 赤のシフト量を増やす
-        r_shifted[:, r_shift_amount:] = (
-            r[:, :-r_shift_amount] if r_shift_amount > 0 else r
-        )
+        # シフト量を計算
+        r_shift_amount = int(6 * intensity)
+        b_shift_amount = int(5 * intensity)
+        g_shift_amount = int(2 * intensity)
 
-        # 青チャンネルを左にシフト
-        b_shifted = np.zeros_like(b)
-        b_shift_amount = int(3 * intensity)
-        b_shifted[:, :-b_shift_amount] = (
-            b[:, b_shift_amount:] if b_shift_amount > 0 else b
-        )
+        # シフトを高速化（np.rollを使用）
+        if r_shift_amount > 0:
+            r_shifted = np.roll(r, r_shift_amount, axis=1)
+            r_shifted[:, :r_shift_amount] = 0  # 左端をゼロ埋め
+        else:
+            r_shifted = r.copy()
 
-        # 緑チャンネルも少しシフトさせる
-        g_shifted = np.zeros_like(g)
-        g_shift_amount = int(1 * intensity)
-        g_shifted[:, g_shift_amount:] = (
-            g[:, :-g_shift_amount] if g_shift_amount > 0 else g
-        )
+        if b_shift_amount > 0:
+            b_shifted = np.roll(b, -b_shift_amount, axis=1)
+            b_shifted[:, -b_shift_amount:] = 0  # 右端をゼロ埋め
+        else:
+            b_shifted = b.copy()
 
-        # 各チャンネルの強度を調整
-        r_shifted = cv2.addWeighted(
-            r_shifted, 1.1, np.zeros_like(r_shifted), 0, 0
-        )  # 赤を強調
-        b_shifted = cv2.addWeighted(
-            b_shifted, 0.9, np.zeros_like(b_shifted), 0, 0
-        )  # 青を弱める
+        if g_shift_amount > 0:
+            g_shifted = np.roll(g, g_shift_amount, axis=1)
+            g_shifted[:, :g_shift_amount] = 0  # 左端をゼロ埋め
+        else:
+            g_shifted = g.copy()
 
+        # 各チャンネルの強度を調整（ベクトル化）
+        r_shifted = r_shifted * 1.2
+        b_shifted = b_shifted * 0.85
+        g_shifted = g_shifted * 0.95
+
+        # 値の範囲をクリップ
+        r_shifted = np.clip(r_shifted, 0, 255).astype(np.uint8)
+        b_shifted = np.clip(b_shifted, 0, 255).astype(np.uint8)
+        g_shifted = np.clip(g_shifted, 0, 255).astype(np.uint8)
+
+        # チャンネルを結合
         return cv2.merge([b_shifted, g_shifted, r_shifted])
 
     def apply_tracking_error(self, frame, strength):
@@ -249,84 +278,72 @@ class VHSMusicVisualizer:
     def apply_vhs_glitch(self, frame, intensity):
         """
         VHSグリッチエフェクトを適用します。
+        高速化版
 
         :param frame: np.ndarray 現在のフレーム
         :param intensity: float グリッチの強度
         :return: np.ndarray 更新されたフレーム
         """
+        # フレームレートを上げるため、確率でスキップ
+        if np.random.random() > 0.3 * intensity:  # 発生確率を下げる
+            return frame  # グリッチを適用しない
+
         height, width = frame.shape[:2]
         glitch_frame = frame.copy()
 
-        # テープの巻き戻しや早送り時のような大きなグリッチ
-        if np.random.random() < 0.1 * intensity:  # まれに発生
-            # 垂直方向の大きなグリッチ
-            vertical_shift = np.random.randint(10, 30)
+        # グリッチの種類をランダムに選択（全てを適用するのではなく、一部のみを適用）
+        glitch_type = np.random.choice(['vertical', 'horizontal', 'color', 'fade'], p=[0.2, 0.4, 0.3, 0.1])
+
+        if glitch_type == 'vertical':
+            # 垂直方向のグリッチ
+            vertical_shift = np.random.randint(5, 20)
             glitch_frame = np.roll(glitch_frame, vertical_shift, axis=0)
 
-            # 色の大きなシフト
-            for c in range(3):
-                shift = np.random.randint(-20, 20)
-                if shift != 0:
-                    glitch_frame[:, :, c] = np.roll(
-                        glitch_frame[:, :, c], shift, axis=1
-                    )
-
-            # ノイズの多い水平ラインを追加
-            for _ in range(np.random.randint(3, 8)):
+            # ノイズラインを追加（数を減らす）
+            num_lines = np.random.randint(1, 4)  # ライン数を減らす
+            for _ in range(num_lines):
                 y = np.random.randint(0, height)
-                h = np.random.randint(2, 10)
+                h = np.random.randint(2, 6)  # 高さを小さく
                 noise = np.random.randint(0, 255, (h, width, 3), dtype=np.uint8)
-                glitch_frame[max(0, y) : min(y + h, height), :] = noise[
-                    : min(h, height - y), :
-                ]
+                if 0 <= y < height - h:
+                    glitch_frame[y:y+h, :] = noise
 
-        # 標準的な水平グリッチ
-        num_glitches = np.random.randint(1, 5)
-        for _ in range(num_glitches):
-            y_start = np.random.randint(0, height - 10)
-            y_end = min(y_start + np.random.randint(5, 20), height)
-            x_shift = np.random.randint(-20, 20)
+        elif glitch_type == 'horizontal':
+            # 水平グリッチ（数を減らす）
+            num_glitches = np.random.randint(1, 3)  # グリッチ数を減らす
+            for _ in range(num_glitches):
+                y_start = np.random.randint(0, height - 10)
+                y_end = min(y_start + np.random.randint(5, 15), height)
+                x_shift = np.random.randint(-15, 15)
 
-            # x_shiftが0の場合はスキップ
-            if x_shift == 0:
-                continue
+                if x_shift == 0:
+                    continue
 
-            if x_shift > 0:
-                glitch_frame[y_start:y_end, x_shift:] = frame[y_start:y_end, :-x_shift]
-                glitch_frame[y_start:y_end, :x_shift] = 0
-            else:
-                x_shift = abs(x_shift)
-                # x_shiftがフレーム幅以上の場合は調整
-                if x_shift >= width:
-                    x_shift = width - 1
-                glitch_frame[y_start:y_end, :-x_shift] = frame[y_start:y_end, x_shift:]
-                glitch_frame[y_start:y_end, -x_shift:] = 0
+                # np.rollを使用して高速化
+                if x_shift > 0:
+                    glitch_frame[y_start:y_end] = np.roll(frame[y_start:y_end], x_shift, axis=1)
+                    glitch_frame[y_start:y_end, :x_shift] = 0
+                else:
+                    glitch_frame[y_start:y_end] = np.roll(frame[y_start:y_end], x_shift, axis=1)
+                    glitch_frame[y_start:y_end, x_shift:] = 0
 
-        # カラーグリッチ
-        if np.random.random() < 0.3:
+        elif glitch_type == 'color':
+            # カラーグリッチ
             channel = np.random.randint(0, 3)
-            glitch_frame[:, :, channel] = np.roll(
-                glitch_frame[:, :, channel], np.random.randint(-10, 10), axis=1
-            )
+            shift = np.random.randint(-10, 10)
+            glitch_frame[:, :, channel] = np.roll(glitch_frame[:, :, channel], shift, axis=1)
 
-        # 古いテープ特有の色あせを再現
-        if np.random.random() < 0.2:
-            # ランダムな領域に色あせを適用
-            fade_x = np.random.randint(0, width - 50)
-            fade_y = np.random.randint(0, height - 50)
-            fade_w = np.random.randint(50, min(150, width - fade_x))
-            fade_h = np.random.randint(50, min(150, height - fade_y))
+        elif glitch_type == 'fade':
+            # 色あせエフェクト（領域を小さく）
+            fade_x = np.random.randint(0, width - 30)
+            fade_y = np.random.randint(0, height - 30)
+            fade_w = np.random.randint(30, min(100, width - fade_x))
+            fade_h = np.random.randint(30, min(100, height - fade_y))
 
             # 色あせ領域を作成
-            fade_region = glitch_frame[
-                fade_y : fade_y + fade_h, fade_x : fade_x + fade_w
-            ].copy()
-            fade_region = cv2.addWeighted(
-                fade_region, 0.7, np.ones_like(fade_region) * 30, 0.3, 0
-            )
-            glitch_frame[fade_y : fade_y + fade_h, fade_x : fade_x + fade_w] = (
-                fade_region
-            )
+            fade_region = glitch_frame[fade_y:fade_y+fade_h, fade_x:fade_x+fade_w].copy()
+            fade_region = cv2.addWeighted(fade_region, 0.7, np.ones_like(fade_region) * 30, 0.3, 0)
+            glitch_frame[fade_y:fade_y+fade_h, fade_x:fade_x+fade_w] = fade_region
 
         return glitch_frame
 
@@ -377,48 +394,45 @@ class VHSMusicVisualizer:
     def apply_vhs_filter(self, frame, energy, current_onset, frame_num=0):
         """
         すべてのVHSエフェクトを適用します。
+        高速化版
 
         :param frame: np.ndarray 現在のフレーム
         :param energy: float 音楽のエネルギー
         :param current_onset: float 現在のオンセット強度
         :return: np.ndarray 更新されたフレーム
         """
-        # 基本的なVHSエフェクト
-        frame = self.apply_vhs_noise(
-            frame, self.vhs_noise_intensity + energy * 0.1
-        )  # ノイズ強度を下げる
-        frame = self.apply_scanlines(frame, self.scanline_intensity)
-        frame = self.apply_color_bleeding(
-            frame, self.color_bleeding_intensity + energy * 0.1
-        )
+        # エフェクトの適用順序を最適化
+        # 必須のエフェクトのみを常に適用し、その他は確率で適用
 
-        # 波状の揺れエフェクトを適用
-        frame = self.apply_vhs_wave_distortion(
-            frame, frame_num, energy * 0.5
-        )  # エネルギーを半分にして揺れを抜く
+        # 1. 基本的なノイズとスキャンライン（常に適用）
+        frame = self.apply_vhs_noise(frame, self.vhs_noise_intensity + energy * 0.15)
+        frame = self.apply_scanlines(frame, self.scanline_intensity + energy * 0.05)
 
-        # ランダムなトラッキングエラー（発生確率を下げる）
-        if np.random.random() < self.tracking_error_chance * 0.5 + current_onset / (
-            self.max_onset * 20
-        ):
-            frame = self.apply_tracking_error(
-                frame, 0.3 + current_onset / self.max_onset
-            )
+        # 2. カラーブリーディング（常に適用）
+        frame = self.apply_color_bleeding(frame, self.color_bleeding_intensity + energy * 0.15)
 
-        # ランダムなグリッチ（発生確率を下げる）
-        if np.random.random() < self.glitch_chance * 0.5 + current_onset / (
-            self.max_onset * 10
-        ):
-            frame = self.apply_vhs_glitch(frame, 0.3 + current_onset / self.max_onset)
+        # 3. 波状の揺れエフェクト（内部で確率判定）
+        frame = self.apply_vhs_wave_distortion(frame, frame_num, energy * 0.3)
 
-        # 色調整 - VHSの色合いに
-        frame = cv2.convertScaleAbs(
-            frame, alpha=0.9, beta=10
-        )  # コントラストを下げ、明るさを上げる
+        # 4. トラッキングエラーとグリッチは確率を下げて適用
+        # ビートに合わせて発生確率を上げる
+        if energy > 0.2 or current_onset > self.max_onset * 0.5:  # エネルギーが高い場合のみ
+            if np.random.random() < self.tracking_error_chance * 0.3 + current_onset / (self.max_onset * 30):
+                frame = self.apply_tracking_error(frame, 0.3 + current_onset / self.max_onset)
 
-        # 彩度を下げる
+            if np.random.random() < self.glitch_chance * 0.3 + current_onset / (self.max_onset * 15):
+                frame = self.apply_vhs_glitch(frame, 0.3 + current_onset / self.max_onset)
+
+        # 5. ノイズバンドは内部で確率判定
+        frame = self.apply_vhs_noise_bands(frame, energy, current_onset)
+
+        # 6. 色調整（常に適用）
+        frame = cv2.convertScaleAbs(frame, alpha=0.85, beta=12)
+
+        # 7. HSV変換と彩度調整（常に適用）
         hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
-        hsv[:, :, 1] = hsv[:, :, 1] * 0.8  # 彩度を80%に
+        hsv[:, :, 1] = hsv[:, :, 1] * 0.75  # 彩度を75%に
+        hsv[:, :, 0] = (hsv[:, :, 0] + 5) % 180  # 色相をシフト
         frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
         return frame
@@ -426,113 +440,122 @@ class VHSMusicVisualizer:
     def apply_vhs_wave_distortion(self, frame, frame_num, energy):
         """
         VHS特有の波状の揺れエフェクトを適用します。
+        高速化版
 
         :param frame: np.ndarray 現在のフレーム
         :param frame_num: int フレーム番号
         :param energy: float 音楽のエネルギー
         :return: np.ndarray 更新されたフレーム
         """
+        # フレームレートを上げるため、全てのフレームではなく一部のフレームのみに揺れを適用
+        # ビートに合わせて揺れを強めるようにする
+        if np.random.random() > 0.7 and energy < 0.1:  # エネルギーが低い場合は確率を下げる
+            return frame  # 揺れを適用しない
+
         height, width = frame.shape[:2]
-        result = np.zeros_like(frame)
 
         # 波の振幅（エネルギーに応じて変化）
-        base_amplitude = 3 + energy * 4  # 揺れの大きさを増やす
+        base_amplitude = 1.5 + energy * 2  # 揺れの大きさ
 
-        # 波の週期
-        period = 0.1 + np.sin(frame_num * 0.01) * 0.05  # 時間とともに変化する週期
+        # 波の週期とジッターを計算
+        period = 0.1 + np.sin(frame_num * 0.01) * 0.05
+        speed_variation = np.sin(frame_num * 0.03) * 2
+        jitter_x = int(np.random.normal(0, 0.5))
+        jitter_y = int(np.random.normal(0, 0.2))
 
-        # テープの速度変動を再現するための追加の揺れ
-        speed_variation = np.sin(frame_num * 0.03) * 2  # 速度変動による追加の揺れ
+        # ベクトル化した高速処理のための準備
+        # 各行のオフセットを一度に計算
+        y_indices = np.arange(height)
+        wave1 = np.sin(y_indices * period + frame_num * 0.05)
+        wave2 = np.sin(y_indices * period * 0.7 + frame_num * 0.02) * 0.5
+        combined_wave = wave1 + wave2 + speed_variation * 0.2
+        offsets = (base_amplitude * combined_wave).astype(int) + jitter_x
 
-        # ビデオヘッドのジッターを再現
-        jitter_x = int(np.random.normal(0, 0.5))  # 水平方向の微妙なジッター
-        jitter_y = int(np.random.normal(0, 0.2))  # 垂直方向の微妙なジッター
+        # ワープマップを作成して高速化
+        map_x = np.zeros((height, width), dtype=np.float32)
+        map_y = np.zeros((height, width), dtype=np.float32)
 
-        # 各行に波状の歧みを適用
         for y in range(height):
-            # 波のオフセットを計算（時間と行番号に基づく）
-            # 複数の正弦波を組み合わせてより自然な揺れに
-            wave1 = np.sin(y * period + frame_num * 0.05)
-            wave2 = np.sin(y * period * 0.7 + frame_num * 0.02) * 0.5
-            combined_wave = wave1 + wave2 + speed_variation * 0.2
-
-            offset = int(base_amplitude * combined_wave) + jitter_x
-
-            # 行を水平方向にシフト
+            offset = offsets[y]
             for x in range(width):
-                # ジッターを考慮したソース位置
-                src_y = y + jitter_y
                 src_x = x + offset
+                src_y = y + jitter_y
 
                 # 画像の端からはみ出さないようにする
-                if 0 <= src_x < width and 0 <= src_y < height:
-                    result[y, x] = frame[src_y, src_x]
-                else:
-                    # 端の場合は黒か直前のピクセルを使用
-                    src_y = max(0, min(src_y, height - 1))
-                    if src_x < 0:
-                        result[y, x] = frame[src_y, 0]
-                    else:
-                        result[y, x] = frame[src_y, width - 1]
+                src_x = max(0, min(src_x, width - 1))
+                src_y = max(0, min(src_y, height - 1))
 
-        # 古いVHSのような微妙なブラーを加える
-        if np.random.random() < 0.3:  # 30%の確率で発生
+                map_x[y, x] = src_x
+                map_y[y, x] = src_y
+
+        # ワープ変換を適用
+        result = cv2.remap(frame, map_x, map_y, cv2.INTER_LINEAR)
+
+        # ブラーは確率を下げて高速化
+        if np.random.random() < 0.1:  # 10%の確率に下げる
             blur_amount = np.random.randint(1, 3)
-            result = cv2.GaussianBlur(
-                result, (blur_amount * 2 + 1, blur_amount * 2 + 1), 0
-            )
+            result = cv2.GaussianBlur(result, (blur_amount * 2 + 1, blur_amount * 2 + 1), 0)
 
         return result
 
     def apply_vhs_noise_bands(self, frame, energy, current_onset):
         """
         VHS特有のノイズバンド（横方向のノイズの波）エフェクトを適用します。
+        高速化版
 
         :param frame: np.ndarray 現在のフレーム
         :param energy: float 音楽のエネルギー
         :param current_onset: float 現在のオンセット強度
         :return: np.ndarray 更新されたフレーム
         """
+        # フレームレートを上げるため、確率でスキップ
+        if np.random.random() > 0.3 + energy * 0.3:  # エネルギーが高いときは発生確率を上げる
+            return frame  # ノイズバンドを適用しない
+
         height, width = frame.shape[:2]
         result = frame.copy()
 
-        # ノイズバンドの数（音楽のエネルギーに応じて変化）を減らす
-        num_bands = int(1 + energy * 2)  # 数を減らす
+        # ノイズバンドの数を減らす
+        num_bands = max(1, int(energy * 1.5))  # 最少で1つ、エネルギーに応じて最大1、2個
 
-        # オンセット強度に応じてノイズバンドの強度を変化（強度を下げる）
-        intensity = 0.15 + (current_onset / self.max_onset) * 0.3  # 強度を下げる
+        # オンセット強度に応じてノイズバンドの強度を変化
+        intensity = 0.1 + (current_onset / self.max_onset) * 0.2
 
-        for _ in range(num_bands):
-            # ランダムな位置にノイズバンドを配置
-            y_pos = np.random.randint(0, height)
-            band_height = np.random.randint(2, 8)  # バンドの高さ
-            band_opacity = np.random.uniform(0.3, 0.7) * intensity
+        # バンドの位置を事前に計算
+        y_positions = np.random.randint(0, height, num_bands)
+        band_heights = np.random.randint(2, 6, num_bands)  # バンドの高さを少し下げる
+        band_opacities = np.random.uniform(0.3, 0.7, num_bands) * intensity
 
-            # ノイズバンドの色（白っぽい色）
-            noise_color = (230, 230, 230)
+        for i in range(num_bands):
+            y_pos = y_positions[i]
+            band_height = band_heights[i]
+            band_opacity = band_opacities[i]
 
-            # ノイズバンドを描画
-            band = np.zeros((band_height, width, 3), dtype=np.uint8)
-            noise = np.random.randint(180, 255, (band_height, width), dtype=np.uint8)
+            # ノイズバンドを一度に生成
+            noise = np.random.randint(180, 255, (band_height, width, 3), dtype=np.uint8)
 
-            for c in range(3):
-                band[:, :, c] = noise
+            # 波のような効果を追加（単純化）
+            # 波の計算をベクトル化
+            x_indices = np.arange(width)
+            wave_offsets = (np.sin(x_indices * 0.05 + np.random.rand() * 10) * 2).astype(int)
 
-            # 波のような効果を追加
             for x in range(width):
-                wave_offset = int(np.sin(x * 0.05 + np.random.rand() * 10) * 2)
-                if 0 <= y_pos + wave_offset < height - band_height:
-                    y = y_pos + wave_offset
-                    result[y : y + band_height, x] = cv2.addWeighted(
-                        result[y : y + band_height, x],
+                wave_offset = wave_offsets[x]
+                y = y_pos + wave_offset
+
+                # 画像の端からはみ出さないようにする
+                if 0 <= y < height - band_height:
+                    # バンド全体を一度に適用
+                    result[y:y+band_height, x] = cv2.addWeighted(
+                        result[y:y+band_height, x],
                         1 - band_opacity,
-                        band[:, x],
+                        noise[:, x],
                         band_opacity,
-                        0,
+                        0
                     )
 
-        # 水平方向のノイズライン（まれに発生）
-        if np.random.random() < 0.05 + energy * 0.1:  # 発生確率を下げる
+        # 水平ノイズラインは確率を下げる
+        if np.random.random() < 0.03 + energy * 0.05:  # 発生確率をさらに下げる
             line_y = np.random.randint(0, height)
             line_height = np.random.randint(1, 3)
             line_color = (255, 255, 255)
